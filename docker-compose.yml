@@ -1,0 +1,19 @@
+
+services:
+  tgcf:
+    image: telegram
+    stdin_open: true
+    tty: true    
+    environment:
+      - PASSWORD=changeme
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+    volumes:
+      - ./data:/app
+    container_name: tgcf
+    build:
+      context: .
+    command: "tgcf live" #auto start the bot when conainer is up, no web access
+    #command: tgcf-web #for web access
+    restart: always
