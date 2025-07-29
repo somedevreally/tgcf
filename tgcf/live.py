@@ -37,12 +37,32 @@ async def new_message_handler(event: Union[Message, events.NewMessage, events.Al
             break
 
     if isinstance(event, events.Album.Event):
-        # Handle albums (forwarded as-is)
+        # Handle albums
         st.stored[event_uid] = {}
-        for d in dest:
-            fwded_msgs = await event.forward_to(d)
-            st.stored[event_uid].update({d: fwded_msgs[0] if fwded_msgs else None})
-        # Apply plugins to captions
+        if CONFIG.show_forwarded_from:
+            # Forward with header if setting is enabled
+            for d in dest:
+                fwded_msgs = await event.forward_to(d)
+                st.stored[event_uid].update({d: fwded_msgs[0] if fwded_msgs else None})
+        else:
+            # Manually send the album without the header
+            media_files = []
+            captions = []
+            for message in event.messages:
+                if message.media:
+                    media_files.append(message.media)
+                    captions.append(message.text)
+            if media_files:
+                for d in dest:
+                    # Send the album as a group
+                    fwded_msgs = await event.client.send_file(
+                        d,
+                        media_files,
+                        caption=captions,
+                        album=True
+                    )
+                    st.stored[event_uid].update({d: fwded_msgs[0] if fwded_msgs else None})
+        # Apply plugins to captions (if needed)
         for message in event.messages:
             tm = await apply_plugins(message)
             if tm and tm.text != message.text:
