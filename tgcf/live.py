@@ -3,7 +3,7 @@
 import logging
 import os
 import sys
-from typing import Union
+from typing import Union, Optional
 
 from telethon import TelegramClient, events, functions, types
 from telethon.sessions import StringSession
@@ -13,52 +13,69 @@ from tgcf import config, const
 from tgcf import storage as st
 from tgcf.bot import get_events
 from tgcf.config import CONFIG, get_SESSION
-from tgcf.plugins import apply_plugins, load_async_plugins
+from tgcf.plugins import apply_plugins
 from tgcf.utils import clean_session_files, send_message
 
 
-async def new_message_handler(event: Union[Message, events.NewMessage]) -> None:
-    """Process new incoming messages."""
+async def new_message_handler(event: Union[Message, events.NewMessage, events.Album]) -> None:
+    """Process new incoming messages, including albums."""
     chat_id = event.chat_id
 
     if chat_id not in config.from_to:
         return
-    logging.info(f"New message received in {chat_id}")
-    message = event.message
+    logging.info(f"New message or album received in {chat_id}")
 
+    dest = config.from_to.get(chat_id)
     event_uid = st.EventUid(event)
 
+    # Handle storage cleanup
     length = len(st.stored)
     exceeding = length - const.KEEP_LAST_MANY
-
     if exceeding > 0:
         for key in st.stored:
             del st.stored[key]
             break
 
-    dest = config.from_to.get(chat_id)
-
-    tm = await apply_plugins(message)
-    if not tm:
-        return
-
-    if event.is_reply:
-        r_event = st.DummyEvent(chat_id, event.reply_to_msg_id)
-        r_event_uid = st.EventUid(r_event)
-
-    st.stored[event_uid] = {}
-    for d in dest:
-        if event.is_reply and r_event_uid in st.stored:
-            tm.reply_to = st.stored.get(r_event_uid).get(d)
-        fwded_msg = await send_message(d, tm)
-        st.stored[event_uid].update({d: fwded_msg})
-    tm.clear()
+    if isinstance(event, events.Album.Event):
+        # Handle albums (forwarded as-is)
+        st.stored[event_uid] = {}
+        for d in dest:
+            fwded_msgs = await event.forward_to(d)
+            st.stored[event_uid].update({d: fwded_msgs[0] if fwded_msgs else None})
+        # Apply plugins to captions
+        for message in event.messages:
+            tm = await apply_plugins(message)
+            if tm and tm.text != message.text:
+                for d in dest:
+                    fwded_msg = st.stored[event_uid].get(d)
+                    if fwded_msg and hasattr(fwded_msg, 'edit'):
+                        await fwded_msg.edit(tm.text)
+    elif not event.message.grouped_id:  # Process non-album messages
+        message = event.message
+        tm = await apply_plugins(message)
+        if not tm:
+            return
+        st.stored[event_uid] = {}
+        # Handle replies
+        if event.is_reply:
+            reply_to_uid = st.EventUid(st.DummyEvent(chat_id, event.reply_to_msg_id))
+            reply_fwded = st.stored.get(reply_to_uid)
+            if reply_fwded:
+                for d in dest:
+                    # Set tm.reply_to to the forwarded message ID in the destination chat
+                    tm.reply_to = reply_fwded.get(d).id if reply_fwded.get(d) else None
+                    fwded_msg = await send_message(d, tm)
+                    st.stored[event_uid].update({d: fwded_msg})
+                    tm.reply_to = None  # Reset for the next destination
+        else:
+            for d in dest:
+                fwded_msg = await send_message(d, tm)
+                st.stored[event_uid].update({d: fwded_msg})
 
 
 async def edited_message_handler(event) -> None:
     """Handle message edits."""
     message = event.message
-
     chat_id = event.chat_id
 
     if chat_id not in config.from_to:
@@ -67,28 +84,25 @@ async def edited_message_handler(event) -> None:
     logging.info(f"Message edited in {chat_id}")
 
     event_uid = st.EventUid(event)
-
-    tm = await apply_plugins(message)
-
-    if not tm:
-        return
-
     fwded_msgs = st.stored.get(event_uid)
 
     if fwded_msgs:
         for _, msg in fwded_msgs.items():
             if config.CONFIG.live.delete_on_edit == message.text:
-                await msg.delete()
+                if msg:
+                    await msg.delete()
                 await message.delete()
             else:
-                await msg.edit(tm.text)
+                tm = await apply_plugins(message)
+                if tm and msg and tm.text:
+                    await msg.edit(tm.text)
         return
 
     dest = config.from_to.get(chat_id)
-
     for d in dest:
-        await send_message(d, tm)
-    tm.clear()
+        tm = await apply_plugins(message)
+        if tm:
+            await send_message(d, tm)
 
 
 async def deleted_message_handler(event):
@@ -103,12 +117,13 @@ async def deleted_message_handler(event):
     fwded_msgs = st.stored.get(event_uid)
     if fwded_msgs:
         for _, msg in fwded_msgs.items():
-            await msg.delete()
-        return
+            if msg:
+                await msg.delete()
 
 
 ALL_EVENTS = {
     "new": (new_message_handler, events.NewMessage()),
+    "album": (new_message_handler, events.Album()),
     "edited": (edited_message_handler, events.MessageEdited()),
     "deleted": (deleted_message_handler, events.MessageDeleted()),
 }
@@ -116,11 +131,7 @@ ALL_EVENTS = {
 
 async def start_sync() -> None:
     """Start tgcf live sync."""
-    # clear past session files
     clean_session_files()
-
-    # load async plugins defined in plugin_models
-    await load_async_plugins()
 
     SESSION = get_SESSION()
     client = TelegramClient(
