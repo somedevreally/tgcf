@@ -30,7 +30,6 @@ def platform_info():
 
 
 async def send_message(recipient: EntityLike, tm: "TgcfMessage") -> Message:
-    """Forward or send a copy, depending on config."""
     client: TelegramClient = tm.client
     if CONFIG.show_forwarded_from:
         return await client.forward_messages(recipient, tm.message)
