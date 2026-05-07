@@ -12,6 +12,7 @@ RUN python -m venv /venv
 COPY . .
 RUN poetry build && \
     /venv/bin/pip install --upgrade pip wheel setuptools &&\
-    /venv/bin/pip install dist/*.whl
+    /venv/bin/pip install dist/*.whl && \
+    /venv/bin/pip install "streamlit<1.30"
 EXPOSE 8501
 CMD tgcf-web
